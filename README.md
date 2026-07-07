@@ -2,6 +2,8 @@
 
 A small Windows utility that fixes the infamous **Battle.net installer "stuck at 45%"** problem by cleaning out every left-over Blizzard / Battle.net file, folder and registry key, then downloading and running a fresh installer.
 
+![Blizzard DeScrewer screenshot](screenshot.png)
+
 Full write-up: [Solution to Battle.net installer stuck at 45%](https://gabrielmoraru.com/solution-to-battle-net-installer-stuck-to-45/)
 
 ## Why the installer gets stuck at 45%
