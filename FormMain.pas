@@ -28,7 +28,6 @@ TYPE
     chkBattleNet   : TCheckBox;
     chkBNetComp    : TCheckBox;
     chkBlizzard    : TCheckBox;
-    chkAllUsers    : TCheckBox;
     chkLocalApp    : TCheckBox;
     chkRoamingApp  : TCheckBox;
     chkDocuments   : TCheckBox;
@@ -38,6 +37,7 @@ TYPE
     chkSecLogon    : TCheckBox;
     chkNetReset    : TCheckBox;
     chkSysRepair   : TCheckBox;
+    chkLocaleFix   : TCheckBox;
     chkDownload    : TCheckBox;
     chkRunInstaller: TCheckBox;
     btnCheckAll    : TButton;
@@ -76,6 +76,7 @@ TYPE
     procedure StepEnableSecondaryLogon;
     procedure StepNetworkReset;
     procedure StepSystemRepair;
+    procedure StepLocaleFix;
     procedure StepRunInstaller;
     procedure SetUIEnabled(Enabled: Boolean);
     procedure DownloadDone(Sender: TObject);
@@ -607,6 +608,19 @@ begin
 end;
 
 
+{ Forces the launcher UI language to English. Verified against a real registry export:
+  HKCU\Software\Blizzard Entertainment\Launcher has a "Locale" string value (here "enUS").
+  REGION is deliberately NOT touched - it is account-specific (EU/US/...). }
+procedure TMainForm.StepLocaleFix;
+CONST LauncherKey = 'Software\Blizzard Entertainment\Launcher';
+begin
+  LogMsg('Forcing Battle.net language to English (enUS)...');
+  if RegWriteString(HKEY_CURRENT_USER, LauncherKey, 'Locale', 'enUS')
+  then LogMsg('  Set HKCU\' + LauncherKey + '\Locale = enUS')
+  else LogMsg('  FAILED to write registry value');
+end;
+
+
 procedure TMainForm.StepRunInstaller;
 begin
   if (FInstallerPath = '') OR NOT FileExists(FInstallerPath)
@@ -690,12 +704,6 @@ begin
     LogMsg('');
    end;
 
-  if chkAllUsers.Checked then
-   begin
-    try StepDeleteFolder('C:\Users\All Users\Battle.net', 'Users\All Users\Battle.net') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
-    LogMsg('');
-   end;
-
   LocalAppData:= GetEnvironmentVariable('LOCALAPPDATA');
   if chkLocalApp.Checked then
    begin
@@ -754,6 +762,13 @@ begin
   if chkSysRepair.Checked then
    begin
     try StepSystemRepair except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    LogMsg('');
+   end;
+
+  { Force launcher language to English }
+  if chkLocaleFix.Checked then
+   begin
+    try StepLocaleFix except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
     LogMsg('');
    end;
 

@@ -21,7 +21,7 @@ begin
   CONST
      MultiThreaded= FALSE;                 // True => Only if we need to use multithreading in the Log.
   CONST
-     AppName= 'Blizzerd De-Screwer';       // Absolutelly critical if you use the SaveForm/LoadForm functionality. This string will be used as the name of the INI file.
+     AppName= 'Blizzard DeScrewer';        // Absolutelly critical if you use the SaveForm/LoadForm functionality. This string will be used as the name of the INI file.
 
   AppData:= TAppData.Create(AppName, '', MultiThreaded);
   AppData.CreateMainForm(TMainForm, MainForm, FALSE, TRUE, asFull);

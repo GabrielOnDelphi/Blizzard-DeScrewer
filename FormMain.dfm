@@ -4312,19 +4312,6 @@ object MainForm: TMainForm
       State = cbChecked
       TabOrder = 5
     end
-    object chkAllUsers: TCheckBox
-      AlignWithMargins = True
-      Left = 5
-      Top = 161
-      Width = 465
-      Height = 17
-      Hint = 'Shared Battle.net data visible to all user accounts on this PC'
-      Align = alTop
-      Caption = 'Delete C:\Users\All Users\Battle.net'
-      Checked = True
-      State = cbChecked
-      TabOrder = 6
-    end
     object chkLocalApp: TCheckBox
       AlignWithMargins = True
       Left = 5
@@ -4448,6 +4435,21 @@ object MainForm: TMainForm
       Align = alTop
       Caption = 'Repair Windows system files (SFC + DISM) - can take 30 min'
       TabOrder = 21
+    end
+    object chkLocaleFix: TCheckBox
+      AlignWithMargins = True
+      Left = 5
+      Top = 297
+      Width = 465
+      Height = 17
+      Hint =
+        'Sets the launcher UI language to English (enUS) in the registry.' +
+        ' Use if Battle.net shows the wrong language. Does not change you' +
+        'r account region. Off by default.'
+      Align = alTop
+      Caption = 'Force Battle.net language to English (fixes wrong-language laun' +
+        'cher)'
+      TabOrder = 23
     end
     object chkDownload: TCheckBox
       AlignWithMargins = True
