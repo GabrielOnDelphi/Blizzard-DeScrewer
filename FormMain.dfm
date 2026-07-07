@@ -2,7 +2,7 @@ object MainForm: TMainForm
   Left = 400
   Top = 200
   Caption = 'Blizzard DeScrewer'
-  ClientHeight = 728
+  ClientHeight = 778
   ClientWidth = 838
   Color = clBtnFace
   Font.Charset = ANSI_CHARSET
@@ -4219,13 +4219,13 @@ object MainForm: TMainForm
     Left = 3
     Top = 3
     Width = 475
-    Height = 585
+    Height = 635
     Align = alLeft
     Caption = ' Cleanup Steps '
     TabOrder = 0
     DesignSize = (
       475
-      585)
+      635)
     object chkKillProc: TCheckBox
       AlignWithMargins = True
       Left = 5
@@ -4483,7 +4483,7 @@ object MainForm: TMainForm
     end
     object btnCheckAll: TButton
       Left = 380
-      Top = 324
+      Top = 424
       Width = 90
       Height = 33
       Hint = 'Select all cleanup steps'
@@ -4494,7 +4494,7 @@ object MainForm: TMainForm
     end
     object btnUncheckAll: TButton
       Left = 380
-      Top = 360
+      Top = 460
       Width = 90
       Height = 33
       Hint = 'Clear all cleanup steps'
