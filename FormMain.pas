@@ -77,6 +77,7 @@ TYPE
     procedure StepNetworkReset;
     procedure StepSystemRepair;
     procedure StepLocaleFix;
+    procedure StepClearRevocationCache;
     procedure StepRunInstaller;
     procedure SetUIEnabled(Enabled: Boolean);
     procedure DownloadDone(Sender: TObject);
@@ -621,6 +622,32 @@ begin
 end;
 
 
+{ Clears the Windows CryptAPI URL cache (cached CRL/OCSP revocation results).
+
+  ROOT CAUSE this fixes (diagnosed 2026-07-14 on Gabriel's own machine):
+  the Battle.net-Setup bootstrapper's very first call is an HTTPS GET to
+  https://us.version.battle.net/bts/versions. Schannel validates that server
+  certificate, which means fetching its revocation status (OCSP/CRL) over HTTP.
+  If that revocation fetch is blocked - a whitelist firewall like TinyWall drops
+  the non-whitelisted Battle.net-Setup.exe, while the browser is allowed - Schannel
+  returns 0x80092013 CRYPT_E_REVOCATION_OFFLINE, the TLS handshake fails, and the
+  bootstrapper reports "can't connect to the patch service" = BLZBNTBTS00000028.
+  Confirmed via Windows System log, Schannel event 36876, SSPI client Battle.net-Setup.
+
+  Windows then CACHES that "revocation offline" negative result, so the next attempt
+  keeps failing even after the firewall is opened. Clearing the cache removes the poison.
+  The cache is per-user; the setup runs elevated but as the SAME user, so this reaches it.
+  Syntax verified: certutil -urlcache * delete  (GlobalSign / gradenegger.eu, 2026-07). }
+procedure TMainForm.StepClearRevocationCache;
+VAR Output: string;
+begin
+  LogMsg('Clearing TLS certificate-revocation cache (CRL/OCSP)...');
+  Output:= ExecuteAndGetOut('certutil -urlcache * delete');
+  LogMsg('  ' + Trim(Output));
+  LogMsg('  (Prevents a cached "revocation server offline" result from blocking the installer.)');
+end;
+
+
 procedure TMainForm.StepRunInstaller;
 begin
   if (FInstallerPath = '') OR NOT FileExists(FInstallerPath)
@@ -629,6 +656,10 @@ begin
     LogMsg('Cannot run installer: file not found at ' + FInstallerPath);
     EXIT;
    end;
+
+  { Pre-flight: drop any cached "revocation offline" failure before the setup's first HTTPS call. }
+  try StepClearRevocationCache except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+  LogMsg('');
 
   LogMsg('Running Battle.net installer...');
   if NOT ExecuteFile(FInstallerPath) then
@@ -639,9 +670,12 @@ begin
   LogMsg('  Installer launched');
   LogMsg('');
   LogMsg('Waiting up to 15 minutes for the installer to complete...');
-  LogMsg('TIP: If the installer freezes at 45%, click "Kill now" to kill Agent.exe.');
-  LogMsg('     This forces the installer to restart the download agent and usually fixes it.');
-  LogMsg('     If it still freezes, try switching to a mobile hotspot or VPN (ISP routing issue).');
+  LogMsg('TIP: "BLZBNTBTS00000028 / can''t connect to the patch service" is almost always your');
+  LogMsg('     FIREWALL blocking the installer''s TLS certificate-revocation check (Schannel 0x80092013).');
+  LogMsg('     A whitelist firewall (e.g. TinyWall) drops Battle.net-Setup.exe while your browser works.');
+  LogMsg('     FIX: whitelist Battle.net-Setup.exe, Battle.net.exe and Agent.exe - OR set the firewall to');
+  LogMsg('     "Allow Outgoing" - then retry. A mobile hotspot / VPN also bypasses it.');
+  LogMsg('     If it instead freezes at 45%, click "Kill now" to kill Agent.exe and force a retry.');
   LogMsg('     Also check Windows Defender > "Controlled Folder Access" - it can silently block the installer.');
   LogMsg('');
   LogMsg('AFTER INSTALL: Battle.net won''t auto-find your games after a clean reinstall.');
