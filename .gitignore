@@ -22,6 +22,9 @@ Linux64/
 # === Project group (this repo ships the single project only) ===
 ProjectGroup1.*
 
+# === Website-only artifact (shipped via FTP, not the repo) ===
+*.rar
+
 # === Unit tests (need external DUnitX / TestInsight to build) ===
 UnitTesting/
 
@@ -34,6 +37,7 @@ CLAUDE.md
 HandOver.md
 ReviewHistory.md
 AI Research-fixes.txt
+FTP-Release-Protocol.md
 .claude/
 Alien 07.jpeg
 BlizzardDeScrewer.res

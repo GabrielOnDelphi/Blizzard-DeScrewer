@@ -242,7 +242,17 @@ procedure TMainForm.LogMsg(const Msg: string);
 begin
   mmo.Lines.Add(Msg);
   SendMessage(mmo.Handle, WM_VSCROLL, SB_BOTTOM, 0);
-  mmo.Update;   // Paint now - the cleanup steps run without a message pump, so the memo would otherwise stay blank until the whole run finishes
+
+  { The cleanup steps run synchronously with NO message pump, so nothing repaints until
+    the whole run ends - the form would show half-drawn garbage (reported by Gabriel).
+    Force an immediate SYNCHRONOUS repaint of the form AND every windowed child control:
+    RDW_UPDATENOW sends WM_ERASEBKGND/WM_PAINT before returning, RDW_ALLCHILDREN reaches
+    the child HWNDs (buttons, memo, group box). Unlike Application.ProcessMessages this
+    pumps NO input messages, so there is no re-entrancy risk. Verified against the Win32
+    RedrawWindow docs, 2026-07-18.
+    Caveat: this refreshes only BETWEEN steps - a single long blocking call (SFC/DISM, or
+    a winmgmt reset) still cannot repaint until it returns. }
+  RedrawWindow(Handle, nil, 0, RDW_INVALIDATE or RDW_ERASE or RDW_ALLCHILDREN or RDW_UPDATENOW);
 end;
 
 
@@ -443,9 +453,27 @@ end;
 
 
 procedure TMainForm.StepResetWMI;
-VAR Output: string;
+VAR Output, NativeCmd: string;
 begin
   LogMsg('Resetting WMI repository...');
+
+  { This tool is a 32-bit (Win32) build. On 64-bit Windows a 32-bit process that runs a bare
+    "winmgmt" is WOW64-redirected to the SysWOW64 copy, so it resets the 32-bit WMI SHADOW
+    instead of the machine's real 64-bit repository - and on Gabriel's box this returned
+    0x8007007E (ERROR_MOD_NOT_FOUND). Route the repository ops through the NATIVE cmd via the
+    "Sysnative" alias so they hit the true 64-bit WMI (and regsvr32/mofcomp resolve to the
+    64-bit copies). Sysnative exists ONLY for a WOW64 process; on a native build or a 32-bit
+    OS it is absent, so we fall back to the normal System32 cmd with no change in behaviour.
+    Verified 2026-07-18 against learn.microsoft.com "File System Redirector". }
+  NativeCmd:= GetEnvironmentVariable('windir');
+  if DirectoryExists(NativeCmd + '\Sysnative')
+  then
+   begin
+    NativeCmd:= NativeCmd + '\Sysnative\cmd.exe';
+    LogMsg('  (32-bit tool on 64-bit Windows - targeting the native 64-bit WMI via Sysnative.)');
+   end
+  else
+    NativeCmd:= NativeCmd + '\System32\cmd.exe';
 
   { Force-kill TinyWall (it registers as NOT_STOPPABLE, so net stop fails) }
   LogMsg('  Force-stopping TinyWall (if running)...');
@@ -461,21 +489,24 @@ begin
 
   { Try salvage first (less destructive than full reset) }
   LogMsg('  Running: winmgmt /salvagerepository');
-  Output:= ExecuteAndGetOut('winmgmt /salvagerepository');
+  Output:= ExecuteAndGetOut(NativeCmd + ' /c winmgmt /salvagerepository');
   LogMsg('  ' + Trim(Output));
 
   { If salvage didn't help, try full reset }
   LogMsg('  Running: winmgmt /resetrepository');
-  Output:= ExecuteAndGetOut('winmgmt /resetrepository');
+  Output:= ExecuteAndGetOut(NativeCmd + ' /c winmgmt /resetrepository');
   LogMsg('  ' + Trim(Output));
 
-  { If reset failed (0x8007007E = missing DLL), recompile MOF files }
+  { If reset failed (0x8007007E = ERROR_MOD_NOT_FOUND, a wbem DLL not registered), re-register
+    the DLLs and recompile the MOF files in the NATIVE wbem folder. Going through NativeCmd
+    makes %SystemRoot%\System32 resolve to the true (un-redirected) folder and regsvr32/mofcomp
+    resolve to the 64-bit copies that match the 64-bit repository. }
   if Pos('0x8007007E', Output) > 0 then
    begin
-    LogMsg('  Reset failed with missing DLL error. Recompiling MOF files...');
-    Output:= ExecuteAndGetOut('cmd /c "cd %windir%\system32\wbem && for /f %s in (''dir /b *.dll'') do regsvr32 /s %s"');
-    LogMsg('  Re-registered DLLs');
-    Output:= ExecuteAndGetOut('cmd /c "cd %windir%\system32\wbem && for /f %s in (''dir /b *.mof *.mfl'') do mofcomp %s"');
+    LogMsg('  Reset failed with 0x8007007E (a WMI module is not registered). Re-registering wbem DLLs...');
+    Output:= ExecuteAndGetOut(NativeCmd + ' /c cd /d %SystemRoot%\System32\wbem && for /f %s in (''dir /b *.dll'') do regsvr32 /s %s');
+    LogMsg('  Re-registered wbem DLLs');
+    Output:= ExecuteAndGetOut(NativeCmd + ' /c cd /d %SystemRoot%\System32\wbem && for /f %s in (''dir /b *.mof *.mfl'') do mofcomp %s');
     LogMsg('  Recompiled MOF files');
    end;
 
@@ -491,7 +522,8 @@ begin
   Output:= ExecuteAndGetOut('net start TinyWall');
   LogMsg('  ' + Trim(Output));
 
-  LogMsg('  TIP: If WMI reset still fails, boot into Safe Mode and run this step there.');
+  LogMsg('  TIP: If WMI reset still fails, the repository may be badly corrupt - reboot into');
+  LogMsg('       Safe Mode and run this step there, or run SFC /scannow + DISM /RestoreHealth first.');
 end;
 
 
