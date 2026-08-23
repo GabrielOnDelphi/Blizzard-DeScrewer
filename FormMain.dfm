@@ -4451,10 +4451,36 @@ object MainForm: TMainForm
         'cher)'
       TabOrder = 23
     end
+    object chkDiagRevoke: TCheckBox
+      AlignWithMargins = True
+      Left = 5
+      Top = 298
+      Width = 465
+      Height = 17
+      Hint = 'Read-only test: asks the Blizzard version service twice, once with the Windows certificate-revocation check and once without. This is the only step that can identify error BLZBNTBTS00000028. Changes nothing.'
+      Align = alTop
+      Caption = 'Diagnose certificate / revocation problem (read-only)'
+      Checked = True
+      State = cbChecked
+      TabOrder = 24
+    end
+    object chkFixRevoke: TCheckBox
+      AlignWithMargins = True
+      Left = 5
+      Top = 300
+      Width = 465
+      Height = 17
+      Hint = 'Clears the revocation cache, resets a broken WinHTTP proxy and re-syncs the clock, re-testing after each one so the log names the fix that worked. Never switches your firewall off.'
+      Align = alTop
+      Caption = 'Fix certificate revocation (cache, proxy, clock)'
+      Checked = True
+      State = cbChecked
+      TabOrder = 25
+    end
     object chkDownload: TCheckBox
       AlignWithMargins = True
       Left = 5
-      Top = 299
+      Top = 302
       Width = 465
       Height = 17
       Hint = 

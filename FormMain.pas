@@ -38,6 +38,8 @@ TYPE
     chkNetReset    : TCheckBox;
     chkSysRepair   : TCheckBox;
     chkLocaleFix   : TCheckBox;
+    chkDiagRevoke  : TCheckBox;
+    chkFixRevoke   : TCheckBox;
     chkDownload    : TCheckBox;
     chkRunInstaller: TCheckBox;
     btnCheckAll    : TButton;
@@ -65,6 +67,8 @@ TYPE
     FInstallerPath   : string;
     FRunning         : Boolean;
     FCountdownSecs   : Integer;
+    FRevocationFailed: Boolean;   { Set by StepDiagnoseRevocation. The installer WILL fail while this is TRUE. }
+    FSetupLogBefore  : string;    { Newest bootstrapper log that existed BEFORE we launched the installer, so we never read a stale one }
     procedure LogMsg(const Msg: string);
     procedure SetStatus(const Msg: string);
     procedure StepKillProcesses;
@@ -78,6 +82,15 @@ TYPE
     procedure StepSystemRepair;
     procedure StepLocaleFix;
     procedure StepClearRevocationCache;
+    function  CurlPath: string;
+    function  ProbeVersionService(NoRevoke: Boolean): string;
+    function  RevocationProbeFails: Boolean;
+    function  ProxyIsConfigured(const NetshOutput: string): Boolean;
+    procedure StepDiagnoseRevocation;
+    procedure StepFixRevocation;
+    function  FindLatestSetupLog: string;
+    procedure CheckInstallerOutcome;
+    function  InternetIsReachable: Boolean;
     procedure StepRunInstaller;
     procedure SetUIEnabled(Enabled: Boolean);
     procedure DownloadDone(Sender: TObject);
@@ -101,7 +114,9 @@ USES
    LightVcl.Common.ExecuteShell,
    LightVcl.Common.ExecuteProc,
    LightVcl.Common.IO,
+   LightCore.IO,
    LightCore.TextFile,
+   LightVcl.Internet.Common,
    uInitialization;
 
 
@@ -111,27 +126,33 @@ CONST
     DownloadToStream follows redirects (HandleRedirects=TRUE, LightCore.Download.pas). }
   InstallerURL = 'https://us.battle.net/download/getInstaller?os=win&installer=Battle.net-Setup.exe';
 
+  { The bootstrapper's very first network call. Probing it reproduces the BLZBNTBTS00000028
+    network phase without running the installer at all. }
+  VersionServiceURL = 'https://us.version.battle.net/bts/versions';
 
-{--------------------------------------------------------------------------------------------------
-   RECURSIVE REGISTRY DELETE
-   Windows RegDeleteKey may fail on keys with subkeys on 64-bit OS.
-   This helper enumerates and deletes subkeys first.
---------------------------------------------------------------------------------------------------}
-function DeleteRegKeyRecursive(Root: HKEY; const Key: string): Boolean;
-VAR
-  SubKeys: TStringList;
-  i: Integer;
-begin
-  SubKeys:= RegEnumSubKeys(Root, Key);
-  try
-    for i:= 0 to SubKeys.Count-1 do
-      DeleteRegKeyRecursive(Root, Key + '\' + SubKeys[i]);
-  finally
-    FreeAndNil(SubKeys);
-  end;
-  Result:= RegDeleteKey(Root, Key);
-end;
+  { CRL distribution point of the Let's Encrypt certificate that us.version.battle.net serves
+    (leaf <- CN=YR2 <- ISRG Root YR <- ISRG Root X1). Used ONLY to prove the machine can reach
+    the CRL host over plain HTTP - any answer counts, including 404, because Let's Encrypt
+    rotates the shard number and this URL will eventually stop being 34.crl. }
+  LetsEncryptCRL = 'http://yr2.c.lencr.org/34.crl';
 
+  { Whitelist-mode (deny-by-default) firewalls. Service names, as they appear under
+    HKLM\SYSTEM\CurrentControlSet\Services. Their presence is the prime suspect when the
+    revocation fetch is refused locally: they block lsass.exe, Windows' own TLS engine, which is
+    not a Blizzard program, so the user never sees a Blizzard entry being denied. }
+  WhitelistFirewalls: array[0..4] of string = ('TinyWall', 'simplewall', 'cmdagent', 'nlsvc', 'GlassWire');
+
+  { The bootstrapper writes one timestamped log per run, named battle.net-setup-YYYYMMDDThhmmss.log.
+    Which folder it lands in depends on the installer build, so all three known candidates are
+    searched and the newest file wins. The name sorts chronologically, which is what
+    FindLatestSetupLog relies on - no file timestamps, no parsing. }
+  SetupLogMask = 'battle.net-setup-*.log';
+
+
+{ The local DeleteRegKeyRecursive helper that used to live here is gone. It existed because LightSaber's
+  RegDeleteKey could not delete a key that had sub-keys - it opened the key with KEY_WRITE, which lacks
+  KEY_QUERY_VALUE, so TRegistry.DeleteKey's own recursion was skipped silently. Fixed at the source on
+  2026-08-22 (LightVcl.Common.Registry.pas), so RegDeleteKey now deletes the whole tree by itself. }
 
 
 {--------------------------------------------------------------------------------------------------
@@ -307,6 +328,14 @@ begin
   Dec(FCountdownSecs);
   pbCountdown.Position:= FCountdownSecs;
 
+  { Ask the installer's own log how it is going, instead of making the user wait out the full
+    countdown to find out it died in the first second. }
+  if FCountdownSecs mod 15 = 0 then
+   begin
+    try CheckInstallerOutcome except on E: Exception do LogMsg('  ERROR reading the installer log: ' + E.Message) end;
+    if NOT tmrCountdown.Enabled then EXIT;    { CheckInstallerOutcome stopped us - the installer failed }
+   end;
+
   if FCountdownSecs <= 0 then
    begin
     StopCountdown;
@@ -411,7 +440,7 @@ begin
   if RegKeyExist(HKEY_CURRENT_USER, Key)
   then
    begin
-    if DeleteRegKeyRecursive(HKEY_CURRENT_USER, Key)
+    if RegDeleteKey(HKEY_CURRENT_USER, Key)
     then LogMsg('  Deleted successfully')
     else LogMsg('  FAILED to delete');
    end
@@ -427,7 +456,7 @@ begin
   if RegKeyExist(HKEY_LOCAL_MACHINE, Key)
   then
    begin
-    if DeleteRegKeyRecursive(HKEY_LOCAL_MACHINE, Key)
+    if RegDeleteKey(HKEY_LOCAL_MACHINE, Key)
     then LogMsg('  Deleted successfully')
     else LogMsg('  FAILED to delete (need admin rights?)');
    end
@@ -669,7 +698,15 @@ end;
   Windows then CACHES that "revocation offline" negative result, so the next attempt
   keeps failing even after the firewall is opened. Clearing the cache removes the poison.
   The cache is per-user; the setup runs elevated but as the SAME user, so this reaches it.
-  Syntax verified: certutil -urlcache * delete  (GlobalSign / gradenegger.eu, 2026-07). }
+  Syntax verified: certutil -urlcache * delete  (GlobalSign / gradenegger.eu, 2026-07).
+
+  LIMIT, measured 2026-08-23 on two machines: this clears the POISONED-CACHE variant only.
+  It does NOT fix the variant seen on both of Gabriel's PCs, where the CRL shard was never
+  cached in the first place - CryptoAPI reports  Failed "CDP" Time: 0  0x80072efd
+  (WinHttp 12029 ERROR_WINHTTP_CANNOT_CONNECT) on http://yr2.c.lencr.org/34.crl, i.e. the
+  request is refused locally and never reaches the wire. Pre-seeding the CRL with
+  certutil -addstore CA installs cleanly but changes nothing either. Keep this step (it is
+  free and it does fix the cached-negative case), but the real diagnosis is the A/B probe. }
 procedure TMainForm.StepClearRevocationCache;
 VAR Output: string;
 begin
@@ -677,6 +714,373 @@ begin
   Output:= ExecuteAndGetOut('certutil -urlcache * delete');
   LogMsg('  ' + Trim(Output));
   LogMsg('  (Prevents a cached "revocation server offline" result from blocking the installer.)');
+end;
+
+
+{ Full path of the Windows-supplied curl.exe, or '' when this Windows is too old to have one
+  (System32\curl.exe ships with Windows 10 1803 and later).
+
+  Why curl and not our own HTTP code: this curl is built against Schannel, so it validates the
+  server certificate through the SAME Windows stack the Battle.net bootstrapper uses. Its
+  --ssl-no-revoke switch turns off exactly one thing - the revocation check - which makes an
+  A/B pair a direct measurement of the failure instead of a guess.
+
+  Do NOT quote the path when handing it to ExecuteAndGetOut: that helper runs
+  "cmd.exe /C <CmdLine>", and cmd mangles the arguments when the command line's FIRST character
+  is a quote (measured 2026-08-23: the whole line up to the next quote was taken as the program
+  name). The Windows directory cannot contain a space, so an unquoted path is safe. }
+function TMainForm.CurlPath: string;
+VAR WinDir: string;
+begin
+  WinDir:= GetEnvironmentVariable('windir');
+
+  { MEASURED 2026-08-23, and it silently falsified the whole diagnosis before it was found:
+    this is a 32-bit tool, so "System32" is WOW64-redirected to SysWOW64 - a DIFFERENT curl.exe
+    (691,760 bytes instead of 791,600). A whitelist firewall permits programs BY PATH, so the
+    64-bit curl was allowed and the 32-bit one was refused; both probes then returned 000 and
+    the step wrongly reported "a real connectivity problem". The Sysnative alias reaches the
+    true System32 and exists ONLY for a WOW64 process - same trick StepResetWMI uses. }
+  if DirectoryExists(WinDir + '\Sysnative') then
+   begin
+    Result:= WinDir + '\Sysnative\curl.exe';
+    if FileExists(Result) then EXIT;
+   end;
+
+  Result:= WinDir + '\System32\curl.exe';
+  if NOT FileExists(Result) then Result:= '';
+end;
+
+
+// Returns the HTTP status code as text. '000' means the TLS handshake never completed.
+//
+// The http_code write-out is used rather than exitcode on purpose: %{exitcode} only exists in
+// curl 7.75 and later, while Windows 10 1803 shipped 7.55. %{http_code} yields '000' on a TLS
+// failure in every version.
+//
+// Line comments, not a { } block: curl's write-out placeholders contain a closing brace, which
+// would end a brace comment early (see the Compiler Quirks note in the global CLAUDE.md).
+function TMainForm.ProbeVersionService(NoRevoke: Boolean): string;
+VAR Cmd: string;
+begin
+  Cmd:= CurlPath + ' -s -o NUL -w "%{http_code}" --max-time 20 ';
+  if NoRevoke
+  then Cmd:= Cmd + '--ssl-no-revoke ';
+  Result:= Trim(ExecuteAndGetOut(Cmd + '"' + VersionServiceURL + '"'));
+end;
+
+
+{ TRUE only for the revocation signature: the handshake fails WITH the revocation check and
+  succeeds WITHOUT it. Both probes failing is a genuine connectivity problem, not this bug,
+  and must not be reported as one. }
+function TMainForm.RevocationProbeFails: Boolean;
+begin
+  Result:= (ProbeVersionService(FALSE) <> '200')
+       AND (ProbeVersionService(TRUE)  =  '200');
+end;
+
+
+{ "netsh winhttp show proxy" prints localized labels, so searching for "Direct access" only
+  works on an English Windows. What IS language-independent: when a proxy exists netsh prints
+  its host:port, and a colon followed immediately by a digit appears nowhere else in that output
+  - the localized labels are always followed by a space. }
+function TMainForm.ProxyIsConfigured(const NetshOutput: string): Boolean;
+VAR i: Integer;
+begin
+  for i:= 1 to Length(NetshOutput)-1 do
+    if (NetshOutput[i] = ':') AND CharInSet(NetshOutput[i+1], ['0'..'9'])
+    then EXIT(TRUE);
+  Result:= FALSE;
+end;
+
+
+{ Read-only probe for the failure DeScrewer's other 18 steps cannot see. Changes nothing.
+
+  WHAT IT DETECTS (measured on two of Gabriel's machines, 2026-08-20 and 2026-08-23):
+  us.version.battle.net now serves a Let's Encrypt certificate that carries NO OCSP responder
+  URL - Let's Encrypt and Google Trust Services have finished retiring OCSP. The only way left
+  for Windows to establish revocation status is to download a 161 KB CRL over plain HTTP on
+  port 80. When that download is refused, Schannel aborts the handshake with 0x80092013
+  CRYPT_E_REVOCATION_OFFLINE and the bootstrapper reports BLZBNTBTS00000028.
+
+  This is a NEW failure class - the same machine worked a year ago, when the check was a small,
+  usually-cached OCSP query - and it will keep spreading as more issuers drop OCSP. }
+procedure TMainForm.StepDiagnoseRevocation;
+VAR
+  OnCode, OffCode, CrlCode, Output, Firewalls: string;
+  i: Integer;
+begin
+  LogMsg('Checking TLS certificate revocation (the invisible cause of BLZBNTBTS00000028)...');
+  FRevocationFailed:= FALSE;    { re-runs must start from a clean verdict }
+
+  if CurlPath = '' then
+   begin
+    LogMsg('  curl.exe not found - needs Windows 10 1803 or later. Skipping this check.');
+    EXIT;
+   end;
+
+  { # The A/B probe }
+  OnCode := ProbeVersionService(FALSE);
+  OffCode:= ProbeVersionService(TRUE);
+  LogMsg('  revocation ON : HTTP ' + OnCode);
+  LogMsg('  revocation OFF: HTTP ' + OffCode);
+
+  if OnCode = '200' then
+   begin
+    LogMsg('  OK - Windows can validate Blizzard''s certificate. This is not your problem.');
+    EXIT;
+   end;
+
+  if OffCode <> '200' then
+   begin
+    LogMsg('  Both probes failed - this is a real connectivity problem, not a revocation one.');
+    LogMsg('  Try the "Clean hosts file" and "Reset network stack" steps.');
+    EXIT;
+   end;
+
+  FRevocationFailed:= TRUE;
+  LogMsg('');
+  LogMsg('  >>> CONFIRMED: the certificate revocation check is failing. <<<');
+  LogMsg('  The installer CAN reach Blizzard. Windows aborts the connection because it');
+  LogMsg('  cannot download the certificate revocation list (CRL).');
+  LogMsg('');
+
+  { # Network, or this machine? }
+  CrlCode:= Trim(ExecuteAndGetOut(CurlPath + ' -s -o NUL -w "%{http_code}" --max-time 15 "' + LetsEncryptCRL + '"'));
+  LogMsg('  CRL download test: HTTP ' + CrlCode);
+  if CrlCode <> '000'
+  then LogMsg('  The CRL host answers from this PC -> your Internet is NOT the problem.')
+  else LogMsg('  The CRL host is unreachable -> a proxy, DNS or upstream filter is blocking HTTP port 80.');
+
+  { # Corroborating facts }
+  Output:= Trim(ExecuteAndGetOut('netsh winhttp show proxy'));
+  LogMsg('  WinHTTP proxy: ' + StringReplace(Output, sLineBreak, ' ', [rfReplaceAll]));
+  if ProxyIsConfigured(Output)
+  then LogMsg('    ^ A WinHTTP proxy is set. If it is unreachable, every CRL fetch fails. See the "Fix" step.');
+
+  LogMsg('  Clock: ' + DateTimeToStr(Now) + ' local / ' + DateTimeToStr(TTimeZone.Local.ToUniversalTime(Now)) + ' UTC');
+  LogMsg('        (a wrong clock makes every CRL look expired, which raises the same error)');
+
+  if Pos('RUNNING', ExecuteAndGetOut('sc query CryptSvc')) = 0
+  then LogMsg('  Could not confirm that Cryptographic Services (CryptSvc) is running - check services.msc.');
+
+  Firewalls:= '';
+  for i:= Low(WhitelistFirewalls) to High(WhitelistFirewalls) do
+    if RegKeyExist(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Services\' + WhitelistFirewalls[i])
+    then Firewalls:= Firewalls + WhitelistFirewalls[i] + ' ';
+
+  LogMsg('');
+  if Firewalls <> '' then
+   begin
+    LogMsg('  Whitelist-mode firewall installed: ' + Trim(Firewalls));
+    LogMsg('  IMPORTANT: the blocked program is NOT a Blizzard one - it is Windows'' own certificate');
+    LogMsg('  service. That is why no Blizzard entry ever appears in your firewall log, and why');
+    LogMsg('  whitelisting Battle.net-Setup.exe / Battle.net.exe / Agent.exe does not help.');
+    LogMsg('  -> Set the firewall to "Allow outgoing" (or allow lsass.exe on outgoing TCP port 80),');
+    LogMsg('     then run this check again.');
+   end
+  else
+    LogMsg('  No whitelist-mode firewall found by name. Run the "Fix certificate revocation" step.');
+end;
+
+
+{ Repairs what can be repaired, cheapest first, re-probing after each sub-fix so the log names
+  the one that actually worked. Does nothing at all when the probe is clean.
+
+  DELIBERATELY NOT DONE - both were tested and ruled out on 2026-08-20:
+    - Pre-seeding the CRL with "certutil -addstore CA <file>". It installs cleanly and changes
+      nothing; Schannel still insists on its own retrieval.
+    - Disabling revocation checking machine-wide. It is a real security downgrade, it would
+      outlive the problem, and Windows offers no supported switch for it anyway: the
+      NoCertRevocationCheck value is read by SstpSvc only, and CRLF_REVCHECK_IGNORE_OFFLINE is
+      a setting on the certificate authority, not on the client (Microsoft Learn, 2026-08).
+  And DeScrewer never turns the user's firewall off by itself - it says what to do instead. }
+procedure TMainForm.StepFixRevocation;
+VAR Output, OldProxy: string;
+begin
+  LogMsg('Repairing certificate revocation...');
+
+  if CurlPath = '' then
+   begin
+    LogMsg('  curl.exe not found - a fix could not be verified. Skipping.');
+    EXIT;
+   end;
+
+  if NOT RevocationProbeFails then
+   begin
+    LogMsg('  Nothing to fix: the revocation check is not what is failing here.');
+    EXIT;
+   end;
+
+  { # 1 - stale cache }
+  LogMsg('  [1/3] Clearing the revocation cache...');
+  ExecuteAndGetOut('certutil -urlcache * delete');
+  if NOT RevocationProbeFails then
+   begin
+    FRevocationFailed:= FALSE;
+    LogMsg('  FIXED by clearing the revocation cache.');
+    EXIT;
+   end;
+
+  { # 2 - WinHTTP proxy }
+  OldProxy:= Trim(ExecuteAndGetOut('netsh winhttp show proxy'));
+  if ProxyIsConfigured(OldProxy) then
+   begin
+    LogMsg('  [2/3] Resetting the WinHTTP proxy. Previous setting was:');
+    LogMsg('        ' + StringReplace(OldProxy, sLineBreak, ' ', [rfReplaceAll]));
+    ExecuteAndGetOut('netsh winhttp reset proxy');
+    if NOT RevocationProbeFails then
+     begin
+      FRevocationFailed:= FALSE;
+      LogMsg('  FIXED by resetting the WinHTTP proxy.');
+      EXIT;
+     end;
+   end
+  else
+    LogMsg('  [2/3] No WinHTTP proxy set - skipping.');
+
+  { # 3 - clock }
+  LogMsg('  [3/3] Re-syncing the system clock...');
+  ExecuteAndGetOut('sc config W32Time start= auto');                             // the space after "start=" is required by sc.exe
+  ExecuteAndGetOut('net start W32Time');
+  Output:= ExecuteAndGetOut('w32tm /resync /force');
+  { w32tm answers on two lines and mixes CRLF with a bare LF, which a TMemo renders as a broken
+    line. Flatten it to one. }
+  Output:= StringReplace(Output, #13, ' ', [rfReplaceAll]);
+  Output:= StringReplace(Output, #10, ' ', [rfReplaceAll]);
+  LogMsg('        ' + Trim(Output));
+  if NOT RevocationProbeFails then
+   begin
+    FRevocationFailed:= FALSE;
+    LogMsg('  FIXED by correcting the clock.');
+    EXIT;
+   end;
+
+  LogMsg('');
+  LogMsg('  Still failing. Your firewall is blocking Windows'' own TLS engine - lsass.exe - from');
+  LogMsg('  downloading the certificate revocation list on outgoing TCP port 80.');
+  LogMsg('  DeScrewer will not change your firewall for you. Do this by hand:');
+  LogMsg('    1. Add a PERMANENT exception for  C:\Windows\System32\lsass.exe');
+  LogMsg('       Outgoing TCP port 80 ONLY. Leave every other port, and all inbound, closed.');
+  LogMsg('    2. Press "Clean" again. This step should then say the revocation check is working.');
+  LogMsg('');
+  LogMsg('  MEASURED 2026-08-23 on a TinyWall machine: lsass.exe is the process that makes the');
+  LogMsg('  fetch. Whitelisting svchost.exe does NOT fix it, and neither does whitelisting any');
+  LogMsg('  Blizzard file - no Blizzard program is involved in this request at all.');
+  LogMsg('  Quick alternative if you would rather not touch lsass.exe: set the firewall to');
+  LogMsg('  "Allow outgoing" for the few minutes the install takes, then put it back.');
+end;
+
+
+{ Newest bootstrapper log on this machine, or '' if there is none.
+
+  The installer writes one timestamped log per run and reports its own verdict there, so the log
+  is the only trustworthy way to learn whether the install actually worked. Watching for the
+  error WINDOW would be worse: its caption is localized and changes between installer builds.
+
+  The file name (battle.net-setup-YYYYMMDDThhmmss.log) sorts chronologically, so plain string
+  comparison finds the newest one across all candidate folders - no file timestamps to trust. }
+function TMainForm.FindLatestSetupLog: string;
+
+  procedure ScanFolder(const Folder: string);
+  VAR
+    Files: TStringList;
+    i: Integer;
+  begin
+    if (Folder = '') OR NOT DirectoryExists(Folder) then EXIT;
+    Files:= ListFilesOf(Folder, SetupLogMask, TRUE, FALSE);
+    TRY
+      for i:= 0 to Files.Count-1 do
+        if (Result = '') OR (CompareText(ExtractFileName(Files[i]), ExtractFileName(Result)) > 0)
+        then Result:= Files[i];
+    FINALLY
+      FreeAndNil(Files);
+    END;
+  end;
+
+begin
+  Result:= '';
+  ScanFolder('C:\ProgramData\Battle.net\Setup');
+  ScanFolder(GetEnvironmentVariable('LOCALAPPDATA') + '\Battle.net\Setup');
+  ScanFolder(GetEnvironmentVariable('TEMP'));
+end;
+
+
+{ Reads the log the installer wrote for THIS run and tells the user what actually happened.
+
+  Called every 15 seconds while the countdown runs, so a failure is reported in seconds instead
+  of after the full 15-minute wait. Only a log newer than FSetupLogBefore counts - otherwise a
+  leftover log from an earlier, failed attempt would be reported as today's result. }
+procedure TMainForm.CheckInstallerOutcome;
+VAR
+  LogFile, Content: string;
+begin
+  LogFile:= FindLatestSetupLog;
+  if LogFile = '' then EXIT;
+  if CompareText(ExtractFileName(LogFile), ExtractFileName(FSetupLogBefore)) <= 0 then EXIT;   { still the pre-launch log }
+
+  Content:= '';
+  TRY
+    Content:= StringFromFile(LogFile);       { the installer keeps the file open - a read can legitimately fail }
+  EXCEPT
+    on E: EFOpenError do EXIT;               { locked right now; the next tick will try again }
+  END;
+
+  if Pos('BLZBNTBTS00000028', Content) = 0 then EXIT;
+
+  StopCountdown;
+  LogMsg('');
+  LogMsg('>>> The installer FAILED with BLZBNTBTS00000028. <<<');
+  LogMsg('    Read from its own log: ' + LogFile);
+  LogMsg('');
+  LogMsg('    This is NOT a broken Internet connection and NOT a leftover Blizzard file.');
+  LogMsg('    Windows could not download the certificate revocation list (CRL) that it needs');
+  LogMsg('    before it will trust Blizzard''s server, so it aborted the connection itself.');
+  LogMsg('    Tick "Diagnose certificate / revocation problem" and press Clean to see the proof.');
+  SetStatus('Installer failed: BLZBNTBTS00000028 (certificate revocation).');
+
+  Application.MessageBox(
+    'The Battle.net installer failed with error BLZBNTBTS00000028.'#13#10#13#10 +
+    'Your Internet connection is fine. The real cause is that Windows cannot download the '
+    + 'certificate revocation list it needs before trusting Blizzard''s server - almost always '
+    + 'because a firewall is blocking WINDOWS ITSELF on port 80. The program being blocked is '
+    + 'lsass.exe, Windows'' own TLS engine - not any Blizzard program, which is why you never see '
+    + 'a Blizzard entry in your firewall.'#13#10#13#10 +
+    'Set your firewall to "Allow outgoing" for a few minutes and run the installer again.'#13#10 +
+    'The log window has the details.',
+    'Battle.net installer failed', MB_OK or MB_ICONWARNING);
+end;
+
+
+{ TRUE when this program can actually reach the Internet. Used ONLY before the automatic
+  installer download - a manual run must never be blocked by a connectivity opinion.
+
+  The three failing answers are genuinely different problems and each gets its own advice.
+  Note the second one: DeScrewer is itself a freshly built EXE, so a whitelist firewall blocks
+  IT by default, which looks exactly like "no Internet" unless it is named. }
+function TMainForm.InternetIsReachable: Boolean;
+VAR State: Integer;
+begin
+  LogMsg('Checking Internet connection...');
+  State:= ProgramConnect2Internet(ConnectivityProbeURL, ConnectivityProbeTimeout, ConnectivityProbeBody);
+  Result:= State > 0;
+
+  case State of
+   -1: begin
+         LogMsg('  This PC is NOT connected to the Internet.');
+         LogMsg('  Connect first, then press Clean again - or download the installer by hand from');
+         LogMsg('  https://www.blizzard.com/download and untick "Download Battle.net installer".');
+       end;
+    0: begin
+         LogMsg('  The PC is online, but THIS program got no answer back.');
+         LogMsg('  Your firewall is blocking BlizzardDeScrewer.exe. Whitelist it (TinyWall: tray icon >');
+         LogMsg('  Whitelist by executable), or download the installer by hand.');
+       end;
+    1: LogMsg('  Connected.');
+    2: begin
+         LogMsg('  Something answered, but it was not the real page - a captive portal or a proxy is');
+         LogMsg('  rewriting traffic. Log in to that portal first; the download would fetch its page.');
+       end;
+  end;
 end;
 
 
@@ -693,6 +1097,31 @@ begin
   try StepClearRevocationCache except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
   LogMsg('');
 
+  { Remember which log already existed, so CheckInstallerOutcome cannot mistake an old failed
+    run for this one. }
+  FSetupLogBefore:= FindLatestSetupLog;
+
+  { Do not let the user watch a 15-minute countdown for an installer we already know will die on
+    its first HTTPS call. }
+  if FRevocationFailed then
+   begin
+    LogMsg('*** WARNING: the revocation check is still failing on this PC. ***');
+    LogMsg('    The installer will almost certainly stop with BLZBNTBTS00000028.');
+    LogMsg('    Fix the firewall first - see the diagnosis above.');
+    LogMsg('');
+    if Application.MessageBox(
+         'The certificate revocation check is still failing on this PC.'#13#10#13#10 +
+         'The Battle.net installer will almost certainly fail with BLZBNTBTS00000028. '
+         + 'Set your firewall to "Allow outgoing" first, then try again.'#13#10#13#10 +
+         'Run the installer anyway?',
+         'Run the installer?', MB_YESNO or MB_ICONWARNING) <> IDYES
+    then
+     begin
+      LogMsg('  Installer NOT started (your choice). It is saved at: ' + FInstallerPath);
+      EXIT;
+     end;
+   end;
+
   LogMsg('Running Battle.net installer...');
   if NOT ExecuteFile(FInstallerPath) then
    begin
@@ -704,9 +1133,14 @@ begin
   LogMsg('Waiting up to 15 minutes for the installer to complete...');
   LogMsg('TIP: "BLZBNTBTS00000028 / can''t connect to the patch service" is almost always your');
   LogMsg('     FIREWALL blocking the installer''s TLS certificate-revocation check (Schannel 0x80092013).');
-  LogMsg('     A whitelist firewall (e.g. TinyWall) drops Battle.net-Setup.exe while your browser works.');
-  LogMsg('     FIX: whitelist Battle.net-Setup.exe, Battle.net.exe and Agent.exe - OR set the firewall to');
-  LogMsg('     "Allow Outgoing" - then retry. A mobile hotspot / VPN also bypasses it.');
+  LogMsg('     Battle.net now uses a Let''s Encrypt certificate with NO OCSP responder, so Windows must');
+  LogMsg('     download a 161 KB CRL over plain HTTP (port 80) before the handshake can finish.');
+  LogMsg('     That download is made by WINDOWS itself (lsass.exe, its TLS engine), NOT by any Blizzard');
+  LogMsg('     program - which is why no Blizzard process ever shows up in your firewall log, and why');
+  LogMsg('     whitelisting Battle.net-Setup.exe / Battle.net.exe / Agent.exe does NOT help.');
+  LogMsg('     FIX: set the firewall to "Allow Outgoing" for a few minutes and retry - OR add a');
+  LogMsg('     permanent exception for C:\Windows\System32\lsass.exe on outgoing TCP port 80 only');
+  LogMsg('     (that is the process that fetches the list). A mobile hotspot / VPN also bypasses it.');
   LogMsg('     If it instead freezes at 45%, click "Kill now" to kill Agent.exe and force a retry.');
   LogMsg('     Also check Windows Defender > "Controlled Folder Access" - it can silently block the installer.');
   LogMsg('');
@@ -723,6 +1157,7 @@ end;
 procedure TMainForm.btnCleanClick(Sender: TObject);
 VAR
   LocalAppData, UserProfile: string;
+  Offline: Boolean;
 begin
   SetUIEnabled(FALSE);
   mmo.Clear;
@@ -838,13 +1273,45 @@ begin
     LogMsg('');
    end;
 
+  { Diagnose the TLS revocation failure. Must run BEFORE the download - there is no point
+    fetching an installer that is about to die on the very same handshake. }
+  if chkDiagRevoke.Checked then
+   begin
+    try StepDiagnoseRevocation except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    LogMsg('');
+   end;
+
+  if chkFixRevoke.Checked then
+   begin
+    try StepFixRevocation except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    LogMsg('');
+   end;
+
   { Download and run installer }
   if chkDownload.Checked then
    begin
     FInstallerPath:= GetEnvironmentVariable('TEMP') + '\Battle.net-Setup.exe';
 
-    { Skip download if installer already exists and is less than 7 days old }
-    if FileExists(FInstallerPath) AND (DaysBetween(Now, TFile.GetLastWriteTime(FInstallerPath)) < 7)
+    { Only the AUTOMATIC download needs a live connection. Checked here, not at startup, so the
+      cleanup steps still run on an offline PC. }
+    Offline:= NOT InternetIsReachable;
+    if Offline then
+     begin
+      LogMsg('');
+      if NOT FileExists(FInstallerPath) then
+       begin
+        LogMsg('  Skipping the download, and there is no installer on disk to fall back on.');
+        SetStatus('No Internet connection - installer not downloaded.');
+        LogMsg('=== Cleanup complete ===');
+        SetUIEnabled(TRUE);
+        EXIT;
+       end;
+      LogMsg('  Cannot download, but an installer is already on disk - using that one.');
+     end;
+    LogMsg('');
+
+    { Skip the download when the installer on disk is still fresh - or when we cannot download at all }
+    if FileExists(FInstallerPath) AND (Offline OR (DaysBetween(Now, TFile.GetLastWriteTime(FInstallerPath)) < 7))
     then
      begin
       LogMsg('Battle.net installer already exists and is recent. Skipping download.');
