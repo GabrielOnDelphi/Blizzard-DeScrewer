@@ -83,6 +83,9 @@ TYPE
     procedure StepLocaleFix;
     procedure StepClearRevocationCache;
     function  NativeCmdPath: string;
+    function  FolderProgramData: string;
+    function  FolderProgramFilesX86: string;
+    function  FolderProgramFilesNative: string;
     function  CurlPath: string;
     function  ProbeVersionService(NoRevoke: Boolean): string;
     function  RevocationProbeFails: Boolean;
@@ -110,6 +113,7 @@ IMPLEMENTATION {$R *.dfm}
 
 USES
    Winapi.WinSvc,
+   Winapi.ShlObj,                    { CSIDL_COMMON_APPDATA / CSIDL_PROGRAM_FILESX86 - see the Folder* helpers }
    System.DateUtils, System.IOUtils,
    LightVcl.Common.Registry,
    LightVcl.Common.Process,
@@ -194,10 +198,10 @@ begin
   { Fallback: check common install locations }
   if Result = '' then
    begin
-    if DirectoryExists('C:\Program Files (x86)\StarCraft II')
-    then EXIT('C:\Program Files (x86)\StarCraft II\');
-    if DirectoryExists('C:\Program Files\StarCraft II')
-    then EXIT('C:\Program Files\StarCraft II\');
+    if DirectoryExists(FolderProgramFilesX86 + '\StarCraft II')
+    then EXIT(FolderProgramFilesX86 + '\StarCraft II\');
+    if DirectoryExists(FolderProgramFilesNative + '\StarCraft II')
+    then EXIT(FolderProgramFilesNative + '\StarCraft II\');
    end;
 end;
 
@@ -218,6 +222,15 @@ begin
   SC2Path:= DetectSC2Path;
   if SC2Path <> ''
   then edtSC2Path.Text:= SC2Path;
+
+  { The design-time captions spell out the default English locations. The paths themselves are now
+    asked from Windows, so on a PC that keeps those folders elsewhere the user would be SHOWN one
+    path and have a different one deleted. Re-label from the very same expression the delete uses,
+    so the label cannot lie about what is about to be removed. }
+  chkBattleNet.Caption:= 'Delete ' + FolderProgramData + '\Battle.net';
+  chkBNetComp.Caption := 'Delete ' + FolderProgramData + '\Battle.net_components';
+  chkBlizzard.Caption := 'Delete ' + FolderProgramData + '\Blizzard Entertainment';
+  chkProgFiles.Caption:= 'Delete ' + FolderProgramFilesX86 + '\Battle.net';
 
   uInitialization.LateInitialization;
   Show;
@@ -472,6 +485,25 @@ procedure TMainForm.StepDeleteFolder(const FolderPath, Description: string);
 begin
   LogMsg('Deleting ' + Description + '...');
   LogMsg('  Path: ' + FolderPath);
+
+  { Refuse anything that is not a full path to a FOLDER on a drive. The folder roots are now asked
+    from Windows instead of hardcoded, and a failed query returns an empty string: '' + '\Battle.net'
+    is '\Battle.net', which Windows resolves against whatever the CURRENT drive happens to be. The
+    Folder* helpers already fall back to a literal so this should never fire - but the next line
+    recursively deletes a tree, and that is not a place to rely on "should never".
+
+    Written with Copy, not FolderPath[2] and FolderPath[3], on purpose. Indexing would fault on a
+    short or empty string unless short-circuit boolean evaluation is in force, and this project
+    builds with range checking ON - so the guard against a bad path could itself raise on the very
+    input it exists to catch. Copy simply returns '' and cannot fault.
+    The Length test is the second half: Copy('C:\', 2, 2) is also ':\', and 'C:\' is a whole DRIVE.
+    Nothing here ever deletes a drive root, and it must stay impossible by construction. }
+  if (Copy(FolderPath, 2, 2) <> ':\') OR (Length(FolderPath) <= 3) then
+   begin
+    LogMsg('  REFUSED: that is not a full path to a folder (like C:\Folder). Nothing was deleted.');
+    EXIT;
+   end;
+
   if DirectoryExists(FolderPath)
   then
    begin
@@ -783,6 +815,62 @@ begin
 end;
 
 
+{ The three system folders this program deletes from, asked from Windows instead of hardcoded.
+
+  WHY, and why NOT for the reason you would expect: on a German (or any localized) Windows the
+  folder on disk is still literally "ProgramData" and "Program Files". Only the name Explorer
+  DISPLAYS is translated - through a desktop.ini entry, plus compatibility junctions such as
+  C:\Programme pointing at the real English folder. Localization is therefore NOT what breaks a
+  hardcoded path. What does break it: Windows installed on a drive other than C:, and a
+  ProgramData or Program Files that has been relocated. On Windows XP the names really were
+  translated on disk, but that is long gone.
+  (Verified: https://en.wikipedia.org/wiki/Program_Files - localized names are junction points to
+  the non-localized locations.)
+
+  ForceFolder stays FALSE on every call. That matters twice: it means no trailing backslash is
+  added (so '\Battle.net' can be appended directly), and it means the call never CREATES the
+  folder - which would be an absurd thing to do right before deleting it. }
+function TMainForm.FolderProgramData: string;
+begin
+  Result:= GetSpecialFolder(CSIDL_COMMON_APPDATA);
+  if Result = '' then
+   begin
+    LogMsg('  WARNING: Windows did not report where ProgramData is. Falling back to C:\ProgramData.');
+    Result:= 'C:\ProgramData';
+   end;
+end;
+
+
+function TMainForm.FolderProgramFilesX86: string;
+begin
+  Result:= GetSpecialFolder(CSIDL_PROGRAM_FILESX86);
+  if Result = '' then
+   begin
+    LogMsg('  WARNING: Windows did not report where Program Files (x86) is. Falling back to C:\Program Files (x86).');
+    Result:= 'C:\Program Files (x86)';
+   end;
+end;
+
+
+{ The NATIVE 64-bit Program Files. No CSIDL returns it to a 32-bit program - MEASURED 2026-08-24 on
+  this machine, from a real 32-bit process: CSIDL_PROGRAM_FILES answers "C:\Program Files (x86)",
+  the same as CSIDL_PROGRAM_FILESX86. LightSaber's GetProgramFilesDir does not help either: it reads
+  HKLM\...\CurrentVersion\ProgramFilesDir, which WOW64 redirects to WOW6432Node, so it agrees with
+  them. ProgramW6432 is the variable Windows provides for exactly this case, and it measured correct
+  (32-bit process: "C:\Program Files"). A genuine 32-bit Windows has no ProgramW6432 - there ProgramFiles
+  is already the only Program Files, so it is the right fallback. }
+function TMainForm.FolderProgramFilesNative: string;
+begin
+  Result:= GetEnvironmentVariable('ProgramW6432');
+  if Result = '' then Result:= GetEnvironmentVariable('ProgramFiles');
+  if Result = '' then
+   begin
+    LogMsg('  WARNING: Windows did not report where Program Files is. Falling back to C:\Program Files.');
+    Result:= 'C:\Program Files';
+   end;
+end;
+
+
 { Full path of the Windows-supplied curl.exe, or '' when this Windows is too old to have one
   (System32\curl.exe ships with Windows 10 1803 and later).
 
@@ -1079,7 +1167,7 @@ function TMainForm.FindLatestSetupLog: string;
 
 begin
   Result:= '';
-  ScanFolder('C:\ProgramData\Battle.net\Setup');
+  ScanFolder(FolderProgramData + '\Battle.net\Setup');
   ScanFolder(GetEnvironmentVariable('LOCALAPPDATA') + '\Battle.net\Setup');
   ScanFolder(GetEnvironmentVariable('TEMP'));
 end;
@@ -1280,19 +1368,19 @@ begin
   { Steps 4-8: Delete folders }
   if chkBattleNet.Checked then
    begin
-    try StepDeleteFolder('C:\ProgramData\Battle.net', 'ProgramData\Battle.net') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    try StepDeleteFolder(FolderProgramData + '\Battle.net', 'ProgramData\Battle.net') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
     LogMsg('');
    end;
 
   if chkBNetComp.Checked then
    begin
-    try StepDeleteFolder('C:\ProgramData\Battle.net_components', 'ProgramData\Battle.net_components') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    try StepDeleteFolder(FolderProgramData + '\Battle.net_components', 'ProgramData\Battle.net_components') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
     LogMsg('');
    end;
 
   if chkBlizzard.Checked then
    begin
-    try StepDeleteFolder('C:\ProgramData\Blizzard Entertainment', 'ProgramData\Blizzard Entertainment') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    try StepDeleteFolder(FolderProgramData + '\Blizzard Entertainment', 'ProgramData\Blizzard Entertainment') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
     LogMsg('');
    end;
 
@@ -1318,7 +1406,7 @@ begin
 
   if chkProgFiles.Checked then
    begin
-    try StepDeleteFolder('C:\Program Files (x86)\Battle.net', 'Program Files (x86)\Battle.net') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+    try StepDeleteFolder(FolderProgramFilesX86 + '\Battle.net', 'Program Files (x86)\Battle.net') except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
     LogMsg('');
    end;
 
