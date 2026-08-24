@@ -2,7 +2,7 @@
 
 {=============================================================================================================
    Blizzard DeScrewer
-   2026.07.06
+   2026.08.23
    www.GabrielMoraru.com
 --------------------------------------------------------------------------------------------------------------
    Automates the cleanup of Battle.net / Blizzard Entertainment remnants from Windows.
@@ -82,6 +82,7 @@ TYPE
     procedure StepSystemRepair;
     procedure StepLocaleFix;
     procedure StepClearRevocationCache;
+    function  NativeCmdPath: string;
     function  CurlPath: string;
     function  ProbeVersionService(NoRevoke: Boolean): string;
     function  RevocationProbeFails: Boolean;
@@ -108,12 +109,14 @@ VAR
 IMPLEMENTATION {$R *.dfm}
 
 USES
+   Winapi.WinSvc,
    System.DateUtils, System.IOUtils,
    LightVcl.Common.Registry,
    LightVcl.Common.Process,
    LightVcl.Common.ExecuteShell,
    LightVcl.Common.ExecuteProc,
    LightVcl.Common.IO,
+   LightVcl.Common.System,
    LightCore.IO,
    LightCore.TextFile,
    LightVcl.Internet.Common,
@@ -494,15 +497,9 @@ begin
     64-bit copies). Sysnative exists ONLY for a WOW64 process; on a native build or a 32-bit
     OS it is absent, so we fall back to the normal System32 cmd with no change in behaviour.
     Verified 2026-07-18 against learn.microsoft.com "File System Redirector". }
-  NativeCmd:= GetEnvironmentVariable('windir');
-  if DirectoryExists(NativeCmd + '\Sysnative')
-  then
-   begin
-    NativeCmd:= NativeCmd + '\Sysnative\cmd.exe';
-    LogMsg('  (32-bit tool on 64-bit Windows - targeting the native 64-bit WMI via Sysnative.)');
-   end
-  else
-    NativeCmd:= NativeCmd + '\System32\cmd.exe';
+  NativeCmd:= NativeCmdPath;
+  if Pos('\Sysnative\', NativeCmd) > 0
+  then LogMsg('  (32-bit tool on 64-bit Windows - targeting the native 64-bit WMI via Sysnative.)');
 
   { Force-kill TinyWall (it registers as NOT_STOPPABLE, so net stop fails) }
   LogMsg('  Force-stopping TinyWall (if running)...');
@@ -639,12 +636,14 @@ begin
   Output:= ExecuteAndGetOut('ipconfig /flushdns');
   LogMsg('  ' + Trim(Output));
 
+  { Native netsh: reproduces the documented repair (an elevated 64-bit cmd) instead of the
+    SysWOW64 copy that WOW64 redirection would hand this 32-bit process. }
   LogMsg('  Resetting Winsock catalog...');
-  Output:= ExecuteAndGetOut('netsh winsock reset');
+  Output:= ExecuteAndGetOut(NativeCmdPath + ' /c netsh winsock reset');
   LogMsg('  ' + Trim(Output));
 
   LogMsg('  Resetting TCP/IP stack...');
-  Output:= ExecuteAndGetOut('netsh int ip reset');
+  Output:= ExecuteAndGetOut(NativeCmdPath + ' /c netsh int ip reset');
   LogMsg('  ' + Trim(Output));
 
   LogMsg('  NOTE: a REBOOT is required for the Winsock/TCP-IP reset to take effect.');
@@ -660,12 +659,22 @@ begin
   LogMsg('  WARNING: this can take 10-30 minutes. The window will look frozen - please wait.');
   mmo.Update;
 
+  { Both tools go through NativeCmdPath, but for different reasons - MEASURED 2026-08-24 on
+    Windows 11 build 26200, from a real 32-bit process:
+      sfc  - MANDATORY. The redirected SysWOW64 copy answers "Windows Resource Protection could
+             not start the repair service", while the same command through Sysnative answers
+             "did not find any integrity violations". Half of this step was dead before the fix.
+      DISM - PRECAUTION only. Here the bare 32-bit DISM worked exactly like the native one (same
+             Image Version, same verdict, no error). Older builds are widely reported to refuse
+             with "Error: 11 - You cannot service a running 64-bit operating system with a 32-bit
+             version of DISM"; that was NOT reproduced on this build, so do not claim it as fact.
+             Routing it natively costs nothing and removes the question. }
   LogMsg('  Running: DISM /Online /Cleanup-Image /RestoreHealth');
-  Output:= ExecuteAndGetOut('DISM /Online /Cleanup-Image /RestoreHealth');
+  Output:= ExecuteAndGetOut(NativeCmdPath + ' /c DISM /Online /Cleanup-Image /RestoreHealth');
   LogMsg(Trim(Output));
 
   LogMsg('  Running: sfc /scannow  (output may look garbled - it is Unicode; check %windir%\Logs\CBS\CBS.log for the real result)');
-  Output:= ExecuteAndGetOut('sfc /scannow');
+  Output:= ExecuteAndGetOut(NativeCmdPath + ' /c sfc /scannow');
   LogMsg(Trim(Output));
 end;
 
@@ -708,12 +717,69 @@ end;
   certutil -addstore CA installs cleanly but changes nothing either. Keep this step (it is
   free and it does fix the cached-negative case), but the real diagnosis is the A/B probe. }
 procedure TMainForm.StepClearRevocationCache;
-VAR Output: string;
+VAR
+  Output: string;
+  Lines: TStringList;
+  i: Integer;
+  Reported: Boolean;
 begin
   LogMsg('Clearing TLS certificate-revocation cache (CRL/OCSP)...');
   Output:= ExecuteAndGetOut('certutil -urlcache * delete');
-  LogMsg('  ' + Trim(Output));
+
+  { Do NOT log this output raw. MEASURED 2026-08-24: certutil printed every cached URL, then
+      WinHttp Cache entries deleted: 7
+      CertUtil: -URLCache command FAILED: 0x80070103 (WIN32/HTTP: 259 ERROR_NO_MORE_ITEMS)
+    It had deleted all 7 entries and succeeded. 0x80070103 is ERROR_NO_MORE_ITEMS - certutil
+    simply ran out of entries to walk - but a user reading "FAILED" concludes the step broke,
+    in the one program whose whole job is telling them what is actually wrong.
+    So: report the counts, swallow that one harmless code, and still show any OTHER failure. }
+  Reported:= FALSE;
+  Lines:= TStringList.Create;
+  TRY
+    Lines.Text:= Output;
+    for i:= 0 to Lines.Count-1 do
+      if Pos('deleted:', Lines[i]) > 0
+      then
+       begin
+        LogMsg('  ' + Trim(Lines[i]));
+        Reported:= TRUE;
+       end
+      else
+      if (Pos('FAILED', Lines[i]) > 0) AND (Pos('0x80070103', Lines[i]) = 0)
+      then
+       begin
+        LogMsg('  ' + Trim(Lines[i]));
+        Reported:= TRUE;
+       end;
+  FINALLY
+    FreeAndNil(Lines);
+  END;
+
+  if NOT Reported
+  then LogMsg('  Nothing was cached.');
+
   LogMsg('  (Prevents a cached "revocation server offline" result from blocking the installer.)');
+end;
+
+
+{ Full path of the NATIVE cmd.exe. This is a 32-bit build, so on 64-bit Windows a bare tool name
+  resolves to the SysWOW64 copy (WOW64 file-system redirection) - a DIFFERENT binary that can give
+  a confidently wrong result. Two of these are MEASURED on Windows 11 build 26200 (2026-08-24):
+  the SysWOW64 sfc cannot start the repair service at all, and SysWOW64 netsh reads/writes the
+  32-BIT WinHTTP proxy view while lsass.exe (64-bit) uses the 64-bit view. DISM, on that build,
+  worked either way - the "32-bit DISM refuses a 64-bit OS" story is reported for older builds
+  but did not reproduce here.
+  The Sysnative alias reaches the true System32 and exists ONLY for a WOW64 process; on 32-bit
+  Windows we fall back to the normal System32 cmd with no change in behaviour.
+  Do NOT quote the result - ExecuteAndGetOut runs "cmd.exe /C <CmdLine>" and cmd mangles a command
+  line whose FIRST character is a quote (see CurlPath); the Windows directory has no spaces. }
+function TMainForm.NativeCmdPath: string;
+VAR WinDir: string;
+begin
+  WinDir:= GetEnvironmentVariable('windir');
+  if DirectoryExists(WinDir + '\Sysnative')
+  then Result:= WinDir + '\Sysnative\cmd.exe'
+  else Result:= WinDir + '\System32\cmd.exe';
 end;
 
 
@@ -852,7 +918,12 @@ begin
   else LogMsg('  The CRL host is unreachable -> a proxy, DNS or upstream filter is blocking HTTP port 80.');
 
   { # Corroborating facts }
-  Output:= Trim(ExecuteAndGetOut('netsh winhttp show proxy'));
+  { NATIVE netsh, not a bare "netsh": WinHTTP proxy settings exist per bitness (the 32-bit view
+    lives under WOW6432Node), and the CRL fetch is made by lsass.exe, a 64-BIT process - so only
+    the 64-bit view matters. A bare netsh from this 32-bit tool would show the 32-bit view and
+    could report "no proxy" while lsass is choking on one (learn.microsoft.com/en-us/archive/
+    blogs/jpsanders/winhttp-proxy-settings-in-64-bit-x64-environments). }
+  Output:= Trim(ExecuteAndGetOut(NativeCmdPath + ' /c netsh winhttp show proxy'));
   LogMsg('  WinHTTP proxy: ' + StringReplace(Output, sLineBreak, ' ', [rfReplaceAll]));
   if ProxyIsConfigured(Output)
   then LogMsg('    ^ A WinHTTP proxy is set. If it is unreachable, every CRL fetch fails. See the "Fix" step.');
@@ -860,7 +931,9 @@ begin
   LogMsg('  Clock: ' + DateTimeToStr(Now) + ' local / ' + DateTimeToStr(TTimeZone.Local.ToUniversalTime(Now)) + ' UTC');
   LogMsg('        (a wrong clock makes every CRL look expired, which raises the same error)');
 
-  if Pos('RUNNING', ExecuteAndGetOut('sc query CryptSvc')) = 0
+  { WinAPI query, not "sc query" - sc.exe prints LOCALIZED state names, so searching its output
+    for 'RUNNING' fails on every non-English Windows. The SCM query is language- and bitness-neutral. }
+  if ServiceGetStatus('', 'CryptSvc') <> SERVICE_RUNNING
   then LogMsg('  Could not confirm that Cryptographic Services (CryptSvc) is running - check services.msc.');
 
   Firewalls:= '';
@@ -907,6 +980,10 @@ begin
 
   if NOT RevocationProbeFails then
    begin
+    { The probe just measured that the revocation signature is NOT present, so a verdict left
+      over from an earlier StepDiagnoseRevocation is stale - without this reset the
+      StepRunInstaller warning prompt would contradict the line logged right below. }
+    FRevocationFailed:= FALSE;
     LogMsg('  Nothing to fix: the revocation check is not what is failing here.');
     EXIT;
    end;
@@ -922,12 +999,15 @@ begin
    end;
 
   { # 2 - WinHTTP proxy }
-  OldProxy:= Trim(ExecuteAndGetOut('netsh winhttp show proxy'));
+  { NATIVE netsh (see StepDiagnoseRevocation): lsass.exe is 64-bit, so only the 64-bit WinHTTP
+    proxy view can poison its CRL fetch. A bare netsh from this 32-bit tool would probe and reset
+    the WOW6432Node view - it would skip the fix exactly when it is needed, and "fix" nothing. }
+  OldProxy:= Trim(ExecuteAndGetOut(NativeCmdPath + ' /c netsh winhttp show proxy'));
   if ProxyIsConfigured(OldProxy) then
    begin
     LogMsg('  [2/3] Resetting the WinHTTP proxy. Previous setting was:');
     LogMsg('        ' + StringReplace(OldProxy, sLineBreak, ' ', [rfReplaceAll]));
-    ExecuteAndGetOut('netsh winhttp reset proxy');
+    ExecuteAndGetOut(NativeCmdPath + ' /c netsh winhttp reset proxy');
     if NOT RevocationProbeFails then
      begin
       FRevocationFailed:= FALSE;
@@ -1022,7 +1102,10 @@ begin
   TRY
     Content:= StringFromFile(LogFile);       { the installer keeps the file open - a read can legitimately fail }
   EXCEPT
-    on E: EFOpenError do EXIT;               { locked right now; the next tick will try again }
+    { EInOutError, NOT EFOpenError: StringFromFile = TFile.ReadAllText, and TFile.OpenRead catches
+      every EFileStreamError (EFOpenError included) and re-raises it as EInOutError
+      (System.IOUtils.pas, TFile.OpenRead). An EFOpenError can never arrive here. }
+    on E: EInOutError do EXIT;               { locked right now; the next tick will try again }
   END;
 
   if Pos('BLZBNTBTS00000028', Content) = 0 then EXIT;
@@ -1062,7 +1145,14 @@ VAR State: Integer;
 begin
   LogMsg('Checking Internet connection...');
   State:= ProgramConnect2Internet(ConnectivityProbeURL, ConnectivityProbeTimeout, ConnectivityProbeBody);
-  Result:= State > 0;
+  Result:= State = 1;   { Only state 1 counts. State 2 = an HTTP 200 came back but the body was NOT
+                          the expected marker, i.e. a captive portal or a content-rewriting proxy is
+                          in the path (LightVcl.Internet.Common.ProgramConnect2Internet). The
+                          installer download that would follow is HTTPS, so on a real portal it dies
+                          in the TLS handshake anyway, and behind a rewriting proxy its content is
+                          whatever that proxy decides to return - neither is worth attempting.
+                          A FALSE here never aborts the cleanup: the caller falls back to an
+                          installer already on disk, or tells the user to fetch one by hand. }
 
   case State of
    -1: begin
@@ -1160,6 +1250,7 @@ VAR
   Offline: Boolean;
 begin
   SetUIEnabled(FALSE);
+  StopCountdown;     { A countdown left over from a previous run monitors an installer this run is about to kill/replace - and its timer could fire from inside any message box shown below }
   mmo.Clear;
   LogMsg('=== Blizzard DeScrewer - Starting cleanup ===');
   LogMsg('');
@@ -1374,35 +1465,49 @@ begin
   Downloader:= FDownloader;
   FDownloader:= NIL;
 
-  if Downloader.DownloadSuccess
-  then
-   begin
-    try
-      Downloader.Data.SaveToFile(FInstallerPath);
-      LogMsg('  Download complete');
-    except
-      on E: Exception do
-        LogMsg('  ERROR saving installer: ' + E.Message);
-    end;
-   end
-  else
-    LogMsg('  Download FAILED: ' + Downloader.HttpRetCode);   // HttpRetCode is a full error message, not a bare numeric code
+  { FINALLY: the field is already detached, so this handler is now the ONLY owner of the object.
+    An exception escaping the body would leak the thread (Synchronize re-raises it on the worker,
+    nothing else ever frees it), so the hand-over to the message queue must be unconditional. }
+  TRY
+    if Downloader.DownloadSuccess
+    then
+     begin
+      try
+        Downloader.Data.SaveToFile(FInstallerPath);
+        LogMsg('  Download complete');
+      except
+        on E: Exception do
+          LogMsg('  ERROR saving installer: ' + E.Message);
+      end;
+     end
+    else
+      LogMsg('  Download FAILED: ' + Downloader.HttpRetCode);   // HttpRetCode is a full error message, not a bare numeric code
 
-  TThread.ForceQueue(NIL, procedure
-    begin
-      FreeAndNil(Downloader);   // Runs on the main thread after the worker has left Synchronize; Destroy's WaitFor returns immediately
-    end);
-  LogMsg('');
-
-  if FileExists(FInstallerPath) AND chkRunInstaller.Checked then
-   begin
-    try StepRunInstaller except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
     LogMsg('');
-   end;
 
-  LogMsg('=== Cleanup complete ===');
-  SetStatus('Done.');
-  SetUIEnabled(TRUE);
+    if FileExists(FInstallerPath) AND chkRunInstaller.Checked then
+     begin
+      try StepRunInstaller except on E: Exception do LogMsg('  ERROR: ' + E.Message) end;
+      LogMsg('');
+     end;
+
+    LogMsg('=== Cleanup complete ===');
+    SetStatus('Done.');
+    SetUIEnabled(TRUE);
+  FINALLY
+    { Queued LAST, after every line that can pump messages. StepRunInstaller's warning prompt
+      (Application.MessageBox) runs a modal message loop, and a modal loop dispatches the WM_NULL
+      that TThread.ForceQueue posts to Application.Handle (Vcl.Forms.pas TApplication.WakeMainThread
+      -> WndProc WM_NULL -> CheckSynchronize) -> this FreeAndNil would run WHILE the worker is
+      still parked inside its Synchronize(DownloadDone) call. Destroy's WaitFor (main thread) then
+      waits on the thread handle, the worker waits for DownloadDone to return: deadlock, frozen UI.
+      Queued here, the free cannot run before DownloadDone returns; the worker leaves Synchronize
+      first, so Destroy's WaitFor returns immediately. }
+    TThread.ForceQueue(NIL, procedure
+      begin
+        FreeAndNil(Downloader);
+      end);
+  END;
 end;
 
 
