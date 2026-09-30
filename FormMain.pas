@@ -17,7 +17,7 @@ USES
   WinApi.Windows, WinApi.Messages, System.SysUtils, System.Classes,
   Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls, Vcl.Forms, Vcl.Controls,
   LightCore.AppData, LightVcl.Visual.AppData, LightVcl.Visual.AppDataForm,
-  LightVcl.Internet.Download.Thread, Vcl.Imaging.jpeg;
+  LightCore.Download.Thread, Vcl.Imaging.jpeg;
 
 TYPE
   TMainForm = class(TLightForm)
@@ -115,8 +115,8 @@ USES
    Winapi.WinSvc,
    Winapi.ShlObj,                    { CSIDL_COMMON_APPDATA / CSIDL_PROGRAM_FILESX86 - see the Folder* helpers }
    System.DateUtils, System.IOUtils,
-   LightVcl.Common.Registry,
-   LightVcl.Common.Process,
+   LightCore.Win.Registry,
+   LightCore.Process,
    LightVcl.Common.ExecuteShell,
    LightVcl.Common.ExecuteProc,
    LightVcl.Common.IO,

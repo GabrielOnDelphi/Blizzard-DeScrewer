@@ -17,7 +17,7 @@ IMPLEMENTATION
 USES
   WinApi.Windows, System.SysUtils, Vcl.Forms,
   LightCore.AppData, LightVcl.Visual.AppData,
-  LightVcl.Common.SystemPermissions,
+  LightCore.SystemPermissions,
   LightVcl.Common.ExecuteShell,
   FormMain;
 
