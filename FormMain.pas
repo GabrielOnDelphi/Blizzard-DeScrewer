@@ -124,7 +124,7 @@ USES
    LightCore.Win.System,
    LightCore.IO,
    LightCore.TextFile,
-   LightVcl.Internet.Common,
+   LightCore.Internet,
    uInitialization;
 
 
@@ -1236,7 +1236,7 @@ begin
   State:= ProgramConnect2Internet(ConnectivityProbeURL, ConnectivityProbeTimeout, ConnectivityProbeBody);
   Result:= State = 1;   { Only state 1 counts. State 2 = an HTTP 200 came back but the body was NOT
                           the expected marker, i.e. a captive portal or a content-rewriting proxy is
-                          in the path (LightVcl.Internet.Common.ProgramConnect2Internet). The
+                          in the path (LightCore.Internet.ProgramConnect2Internet). The
                           installer download that would follow is HTTPS, so on a real portal it dies
                           in the TLS handshake anyway, and behind a rewriting proxy its content is
                           whatever that proxy decides to return - neither is worth attempting.
