@@ -1626,7 +1626,7 @@ end;
 
 
 { Loaded runs right after DFM streaming,
-  and **BEFORE** TAppData.CreateMainForm calls LoadForm (asFull) which loads user's last settings.
+  and **BEFORE** TAppData.CreateMainForm calls LoadForm(asFull) which loads user's last settings.
   So this is the only moment the DFM value can still be read. Tag keeps it: 1 = recommended. No checkbox in grpCleanup uses Tag otherwise. }
 procedure TMainForm.Loaded;
 VAR i: Integer;
