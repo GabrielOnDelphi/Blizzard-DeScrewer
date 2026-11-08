@@ -38,22 +38,26 @@ TYPE
     chkNetReset    : TCheckBox;
     chkSysRepair   : TCheckBox;
     chkLocaleFix   : TCheckBox;
-    chkDiagRevoke  : TCheckBox;
-    chkFixRevoke   : TCheckBox;
     chkDownload    : TCheckBox;
     chkRunInstaller: TCheckBox;
-    btnCheckAll    : TButton;
-    btnUncheckAll  : TButton;
     btnClean       : TButton;
     mmo            : TMemo;
     pbCountdown    : TProgressBar;
     StatBar        : TStatusBar;
     tmrCountdown   : TTimer;
-    Image1: TImage;
     Panel1: TPanel;
-    lblSC2: TLabel;
+    lblGamePath: TLabel;
     edtSC2Path: TEdit;
     btnHelpLocate: TButton;
+    pnlImageRight: TPanel;
+    Panel2: TPanel;
+    btnCheckAll: TButton;
+    btnUncheckAll: TButton;
+    imgAlienLogo: TImage;
+    grpLsass: TGroupBox;
+    chkFixRevoke: TCheckBox;
+    chkDiagRevoke: TCheckBox;
+    btnCheckDefaults: TButton;
     procedure btnCleanClick      (Sender: TObject);
     procedure btnCheckAllClick   (Sender: TObject);
     procedure btnUncheckAllClick (Sender: TObject);
@@ -62,6 +66,7 @@ TYPE
     procedure FormCloseQuery     (Sender: TObject; var CanClose: Boolean);
     procedure btnKillClick       (Sender: TObject);
     procedure tmrCountdownTimer  (Sender: TObject);
+    procedure btnCheckDefaultsClick(Sender: TObject);
   private
     FDownloader      : TWinInetObj;
     FInstallerPath   : string;
@@ -101,6 +106,8 @@ TYPE
     procedure StartCountdown;
     procedure StopCountdown;
     function  DetectSC2Path: string;
+  protected
+    procedure Loaded; override;
   public
     procedure FormPostInitialize; override;
     procedure FormPreRelease; override;
@@ -1137,6 +1144,16 @@ begin
   LogMsg('  Blizzard file - no Blizzard program is involved in this request at all.');
   LogMsg('  Quick alternative if you would rather not touch lsass.exe: set the firewall to');
   LogMsg('  "Allow outgoing" for the few minutes the install takes, then put it back.');
+
+  { From a user report, not reproduced here: on ESET, adding lsass.exe to the exclusion lists of
+    the antivirus and of Windows Defender did not help; turning off HTTP traffic scanning did.
+    The user remembers the same problem with Kaspersky's HTTP filtering. }
+  LogMsg('');
+  LogMsg('  No firewall, or the firewall already allows it? Then your ANTIVIRUS may be the blocker.');
+  LogMsg('  An antivirus that scans HTTP / web traffic (reported for ESET, possibly Kaspersky)');
+  LogMsg('  sits inside this port-80 download. For one ESET user, adding lsass.exe to the');
+  LogMsg('  antivirus exclusion list did NOT help - turning off "HTTP traffic scanning" did.');
+  LogMsg('  Turn it off for the install, then turn it back on.');
 end;
 
 
@@ -1217,7 +1234,10 @@ begin
     + 'because a firewall is blocking WINDOWS ITSELF on port 80. The program being blocked is '
     + 'lsass.exe, Windows'' own TLS engine - not any Blizzard program, which is why you never see '
     + 'a Blizzard entry in your firewall.'#13#10#13#10 +
-    'Set your firewall to "Allow outgoing" for a few minutes and run the installer again.'#13#10 +
+    'Set your firewall to "Allow outgoing" for a few minutes and run the installer again.'#13#10#13#10 +
+    'If that does not help: an antivirus that scans web traffic (for example ESET or Kaspersky) '
+    + 'can block the same download. Adding lsass.exe to its exclusion list may not be enough - '
+    + 'turn off its HTTP traffic scanning during the install, then turn it back on.'#13#10#13#10 +
     'The log window has the details.',
     'Battle.net installer failed', MB_OK or MB_ICONWARNING);
 end;
@@ -1322,6 +1342,10 @@ begin
   LogMsg('     (that is the process that fetches the list). A mobile hotspot / VPN also bypasses it.');
   LogMsg('     If it instead freezes at 45%, click "Kill now" to kill Agent.exe and force a retry.');
   LogMsg('     Also check Windows Defender > "Controlled Folder Access" - it can silently block the installer.');
+  { Antivirus lines: one user report (ESET), not reproduced here. See StepFixRevocation. }
+  LogMsg('     ANTIVIRUS: an antivirus that scans HTTP / web traffic (reported for ESET, possibly Kaspersky)');
+  LogMsg('     can break the same download. Adding lsass.exe to its exclusion list may NOT help.');
+  LogMsg('     Turn OFF its "HTTP traffic scanning" during the install, then turn it back on.');
   LogMsg('');
   LogMsg('AFTER INSTALL: Battle.net won''t auto-find your games after a clean reinstall.');
   LogMsg('  Go to StarCraft II > click "Locate the game" > browse to your SC2 folder.');
@@ -1601,5 +1625,26 @@ end;
 
 
 
+{ The recommended state of each step is its Checked value in the DFM - the one place it is written.
+  Loaded runs right after DFM streaming, BEFORE TAppData.CreateMainForm calls LoadForm (asFull),
+  which overwrites Checked with the user's last session. So this is the only moment the DFM value
+  can still be read. Tag keeps it: 1 = recommended. No checkbox in grpCleanup uses Tag otherwise. }
+procedure TMainForm.Loaded;
+VAR i: Integer;
+begin
+  inherited Loaded;
+  for i:= 0 to grpCleanup.ControlCount-1 do
+    if grpCleanup.Controls[i] is TCheckBox
+    then grpCleanup.Controls[i].Tag:= Ord(TCheckBox(grpCleanup.Controls[i]).Checked);
+end;
+
+
+procedure TMainForm.btnCheckDefaultsClick(Sender: TObject);
+VAR i: Integer;
+begin
+  for i:= 0 to grpCleanup.ControlCount-1 do
+    if grpCleanup.Controls[i] is TCheckBox
+    then TCheckBox(grpCleanup.Controls[i]).Checked:= grpCleanup.Controls[i].Tag = 1;
+end;
 
 end.
