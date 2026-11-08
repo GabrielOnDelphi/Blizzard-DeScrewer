@@ -1625,10 +1625,9 @@ end;
 
 
 
-{ The recommended state of each step is its Checked value in the DFM - the one place it is written.
-  Loaded runs right after DFM streaming, BEFORE TAppData.CreateMainForm calls LoadForm (asFull),
-  which overwrites Checked with the user's last session. So this is the only moment the DFM value
-  can still be read. Tag keeps it: 1 = recommended. No checkbox in grpCleanup uses Tag otherwise. }
+{ Loaded runs right after DFM streaming,
+  and **BEFORE** TAppData.CreateMainForm calls LoadForm (asFull) which loads user's last settings.
+  So this is the only moment the DFM value can still be read. Tag keeps it: 1 = recommended. No checkbox in grpCleanup uses Tag otherwise. }
 procedure TMainForm.Loaded;
 VAR i: Integer;
 begin
