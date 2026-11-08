@@ -332,7 +332,7 @@ object MainForm: TMainForm
         Left = 3
         Top = 3
         Width = 57
-        Height = 37
+        Height = 40
         Hint = 
           'StarCraft II install path detected from the registry. This is sa' +
           'ved before cleanup and can be restored afterward.'
