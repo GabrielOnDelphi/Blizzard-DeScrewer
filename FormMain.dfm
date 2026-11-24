@@ -295,7 +295,7 @@ object MainForm: TMainForm
         'esh Battle.net installer. All deleted folders are sent to the Re' +
         'cycle Bin.'
       Align = alBottom
-      Caption = 'CLEAN && REINSTALL'
+      Caption = 'START'
       Font.Charset = ANSI_CHARSET
       Font.Color = clWindowText
       Font.Height = -17
@@ -307,7 +307,7 @@ object MainForm: TMainForm
     end
     object btnKill: TButton
       Left = 461
-      Top = 101
+      Top = 123
       Width = 75
       Height = 28
       Anchors = [akTop, akRight]
@@ -377,7 +377,7 @@ object MainForm: TMainForm
       Left = 5
       Top = 23
       Width = 528
-      Height = 76
+      Height = 98
       Hint = 
         'Try this thing first if you have a firewall (like TinyWall) in t' +
         'his computer'
@@ -419,6 +419,24 @@ object MainForm: TMainForm
         Enabled = False
         State = cbChecked
         TabOrder = 1
+      end
+      object lblLsassFirewall: TLabel
+        AlignWithMargins = True
+        Left = 5
+        Top = 69
+        Width = 518
+        Height = 18
+        Hint =
+          'Windows itself (lsass.exe), not a Blizzard program, downloads th' +
+          'e certificate revocation list before Battle.net can connect.'#13#10'A ' +
+          'firewall that blocks it causes error BLZBNTBTS00000028.'#13#10'Allow ' +
+          'only outgoing TCP port 80. Keep every other port and all inbound' +
+          ' traffic closed.'#13#10'Allowing svchost.exe or the Blizzard files do' +
+          'es NOT fix it.'
+        Align = alTop
+        Caption =
+          'Firewall? Allow C:\Windows\System32\lsass.exe (outgoing, TCP port' +
+          ' 80)'
       end
     end
   end
