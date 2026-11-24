@@ -41,6 +41,7 @@ TYPE
     chkDownload    : TCheckBox;
     chkRunInstaller: TCheckBox;
     btnClean       : TButton;
+    btnKill        : TButton;
     mmo            : TMemo;
     pbCountdown    : TProgressBar;
     StatBar        : TStatusBar;
@@ -57,6 +58,7 @@ TYPE
     grpLsass: TGroupBox;
     chkFixRevoke: TCheckBox;
     chkDiagRevoke: TCheckBox;
+    lblLsassFirewall: TLabel;
     btnCheckDefaults: TButton;
     procedure btnCleanClick      (Sender: TObject);
     procedure btnCheckAllClick   (Sender: TObject);
@@ -239,6 +241,15 @@ begin
   chkBNetComp.Caption := 'Delete ' + FolderProgramData + '\Battle.net_components';
   chkBlizzard.Caption := 'Delete ' + FolderProgramData + '\Blizzard Entertainment';
   chkProgFiles.Caption:= 'Delete ' + FolderProgramFilesX86 + '\Battle.net';
+
+  { The revocation diagnosis is read-only and always runs, so its checkbox is disabled in the DFM.
+    asFull restores Checked from the INI file, which may hold FALSE (chkDiagRevoke=0),
+    and a disabled box can never be ticked again by the user. Force it back. }
+  chkDiagRevoke.Checked:= TRUE;
+
+  { btnKill is not aligned: it floats over the right end of chkKillProc, which is alTop.
+    Follow the checkbox so a taller control above it cannot leave the button behind. }
+  btnKill.Top:= chkKillProc.Top + (chkKillProc.Height - btnKill.Height) DIV 2;
 
   uInitialization.LateInitialization;
   Show;
@@ -1137,7 +1148,7 @@ begin
   LogMsg('  DeScrewer will not change your firewall for you. Do this by hand:');
   LogMsg('    1. Add a PERMANENT exception for  C:\Windows\System32\lsass.exe');
   LogMsg('       Outgoing TCP port 80 ONLY. Leave every other port, and all inbound, closed.');
-  LogMsg('    2. Press "Clean" again. This step should then say the revocation check is working.');
+  LogMsg('    2. Press "Start" again. This step should then say the revocation check is working.');
   LogMsg('');
   LogMsg('  MEASURED 2026-08-23 on a TinyWall machine: lsass.exe is the process that makes the');
   LogMsg('  fetch. Whitelisting svchost.exe does NOT fix it, and neither does whitelisting any');
@@ -1224,7 +1235,7 @@ begin
   LogMsg('    This is NOT a broken Internet connection and NOT a leftover Blizzard file.');
   LogMsg('    Windows could not download the certificate revocation list (CRL) that it needs');
   LogMsg('    before it will trust Blizzard''s server, so it aborted the connection itself.');
-  LogMsg('    Tick "Diagnose certificate / revocation problem" and press Clean to see the proof.');
+  LogMsg('    Tick "Diagnose certificate / revocation problem" and press Start to see the proof.');
   SetStatus('Installer failed: BLZBNTBTS00000028 (certificate revocation).');
 
   Application.MessageBox(
@@ -1266,7 +1277,7 @@ begin
   case State of
    -1: begin
          LogMsg('  This PC is NOT connected to the Internet.');
-         LogMsg('  Connect first, then press Clean again - or download the installer by hand from');
+         LogMsg('  Connect first, then press Start again - or download the installer by hand from');
          LogMsg('  https://www.blizzard.com/download and untick "Download Battle.net installer".');
        end;
     0: begin
