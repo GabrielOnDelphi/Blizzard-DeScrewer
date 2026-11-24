@@ -35,6 +35,7 @@ UnitTesting/
 # === Internal working docs (AI workflow, not for the public repo) ===
 CLAUDE.md
 HandOver.md
+HandOver - history.md
 ReviewHistory.md
 AI Research-fixes.txt
 FTP-Release-Protocol.md
